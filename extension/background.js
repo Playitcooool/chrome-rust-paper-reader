@@ -1,0 +1,331 @@
+import {
+  DEFAULT_CONNECTOR_URL,
+  DOWNLOAD_FOLDER,
+  MENU_ID_SAVE_LINK,
+  STORAGE_KEYS
+} from "./shared/constants.js";
+import { classifyUrl, dedupeCandidates, sanitizeFilename } from "./shared/file-detection.js";
+import { fetchCollections, importPath } from "./shared/connector-client.js";
+
+const downloadJobs = new Map();
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: MENU_ID_SAVE_LINK,
+    title: "Save to Paper Reader",
+    contexts: ["link"]
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== MENU_ID_SAVE_LINK || !info.linkUrl) return;
+  void handleContextMenuImport(info.linkUrl, tab?.url || info.pageUrl || info.frameUrl || "");
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "paper-reader:get-state") {
+    void getState().then(sendResponse, (error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "paper-reader:save-config") {
+    void saveConfig(message.payload).then(sendResponse, (error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "paper-reader:load-collections") {
+    void loadCollections().then(sendResponse, (error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "paper-reader:detect-page-files") {
+    void detectPageFiles(message.tabId).then(sendResponse, (error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "paper-reader:import-candidate") {
+    void importCandidate(message.payload, sender.tab?.id).then(sendResponse, (error) => sendResponse({ error: error.message }));
+    return true;
+  }
+
+  return undefined;
+});
+
+async function getConfig() {
+  const stored = await chrome.storage.sync.get([
+    STORAGE_KEYS.connectorUrl,
+    STORAGE_KEYS.connectorToken,
+    STORAGE_KEYS.lastCollectionId
+  ]);
+
+  return {
+    connectorUrl: stored[STORAGE_KEYS.connectorUrl] || DEFAULT_CONNECTOR_URL,
+    connectorToken: stored[STORAGE_KEYS.connectorToken] || "",
+    lastCollectionId: stored[STORAGE_KEYS.lastCollectionId] ?? null
+  };
+}
+
+async function saveConfig(payload) {
+  await chrome.storage.sync.set({
+    [STORAGE_KEYS.connectorUrl]: payload.connectorUrl?.trim() || DEFAULT_CONNECTOR_URL,
+    [STORAGE_KEYS.connectorToken]: payload.connectorToken?.trim() || "",
+    [STORAGE_KEYS.lastCollectionId]: payload.lastCollectionId ?? null
+  });
+  return { ok: true };
+}
+
+async function getState() {
+  return getConfig();
+}
+
+async function loadCollections() {
+  const config = await getConfig();
+  if (!config.connectorToken) {
+    throw new Error("Connector token is required.");
+  }
+
+  const collections = await fetchCollections(config.connectorUrl, config.connectorToken);
+  return {
+    collections,
+    config
+  };
+}
+
+async function detectPageFiles(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const pageUrl = tab.url || "";
+  const direct = await detectDirectCandidate(pageUrl);
+  if (direct) {
+    return { pageUrl, candidates: [direct], mode: "direct" };
+  }
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: scanLinksInPage
+  });
+  const candidates = dedupeCandidates(result?.candidates || []);
+  return {
+    pageUrl: result?.pageUrl || pageUrl,
+    candidates,
+    mode: candidates.length <= 1 ? "auto" : "pick"
+  };
+}
+
+async function detectDirectCandidate(url) {
+  if (!url) return null;
+  try {
+    return await classifyUrl(url);
+  } catch {
+    return null;
+  }
+}
+
+async function importCandidate(payload, tabId) {
+  const config = await getConfig();
+  if (!config.connectorToken) {
+    throw new Error("Connector token is required.");
+  }
+
+  const download = await downloadToTemp(payload.candidate.url, payload.candidate.title);
+  const job = {
+    collectionId: payload.collectionId,
+    pageUrl: payload.pageUrl,
+    sourceUrl: payload.candidate.url,
+    downloadId: download.downloadId,
+    filename: download.filename,
+    localPath: download.localPath
+  };
+
+  downloadJobs.set(download.downloadId, job);
+
+  try {
+    const result = await importPath(config.connectorUrl, config.connectorToken, {
+      collection_id: payload.collectionId,
+      path: download.localPath,
+      source_url: payload.candidate.url,
+      page_url: payload.pageUrl,
+      download_id: download.downloadId
+    });
+
+    const outcome = summarizeImportResult(result, download.localPath);
+    if (outcome.status === "imported" || outcome.status === "duplicate") {
+      await cleanupDownload(download.downloadId);
+    }
+
+    await chrome.storage.sync.set({ [STORAGE_KEYS.lastCollectionId]: payload.collectionId });
+
+    return {
+      ok: true,
+      result,
+      outcome,
+      download,
+      tabId
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+      download
+    };
+  } finally {
+    downloadJobs.delete(download.downloadId);
+  }
+}
+
+async function handleContextMenuImport(linkUrl, pageUrl) {
+  const config = await getConfig();
+  if (!config.lastCollectionId) {
+    await setBadge("!", "#A33A2B");
+    return;
+  }
+
+  const candidate = await classifyUrl(linkUrl);
+  if (!candidate) {
+    await setBadge("?", "#6A5ACD");
+    return;
+  }
+
+  const response = await importCandidate({
+    collectionId: config.lastCollectionId,
+    candidate,
+    pageUrl
+  });
+
+  if (!response.ok) {
+    await setBadge("!", "#A33A2B");
+    return;
+  }
+
+  await setBadge(response.outcome.status === "duplicate" ? "=" : "✓", "#295F4E");
+}
+
+async function setBadge(text, color) {
+  await chrome.action.setBadgeText({ text });
+  await chrome.action.setBadgeBackgroundColor({ color });
+  setTimeout(() => {
+    void chrome.action.setBadgeText({ text: "" });
+  }, 2500);
+}
+
+async function downloadToTemp(url, suggestedName) {
+  const extension = suggestedName.includes(".") ? "" : inferExtensionFromUrl(url);
+  const safeName = sanitizeFilename(suggestedName || "download") + extension;
+  const filename = `${DOWNLOAD_FOLDER}/${Date.now()}-${safeName}`;
+
+  const downloadId = await chrome.downloads.download({
+    url,
+    filename,
+    conflictAction: "uniquify",
+    saveAs: false
+  });
+
+  const downloadItem = await waitForDownload(downloadId);
+  return {
+    downloadId,
+    filename: downloadItem.filename,
+    localPath: downloadItem.filename
+  };
+}
+
+function inferExtensionFromUrl(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/(\.[a-z0-9]+)$/i);
+    return match ? "" : ".bin";
+  } catch {
+    return ".bin";
+  }
+}
+
+function waitForDownload(downloadId) {
+  return new Promise((resolve, reject) => {
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      if (delta.state?.current === "complete") {
+        chrome.downloads.search({ id: downloadId }, (items) => {
+          chrome.downloads.onChanged.removeListener(onChanged);
+          const item = items?.[0];
+          if (!item?.filename) {
+            reject(new Error("Download completed without a local filename."));
+            return;
+          }
+          resolve(item);
+        });
+      }
+      if (delta.state?.current === "interrupted") {
+        chrome.downloads.onChanged.removeListener(onChanged);
+        reject(new Error(delta.error?.current || "Download interrupted."));
+      }
+    };
+
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
+}
+
+async function cleanupDownload(downloadId) {
+  try {
+    await chrome.downloads.removeFile(downloadId);
+  } catch {
+    // The file may already be gone; keep cleanup best-effort.
+  }
+
+  try {
+    await chrome.downloads.erase({ id: downloadId });
+  } catch {
+    // Ignore download history cleanup failures.
+  }
+}
+
+function summarizeImportResult(result, path) {
+  const imported = result.imported?.length || 0;
+  const duplicate = (result.duplicates || []).find((entry) => entry.path === path);
+  const failed = (result.failed || []).find((entry) => entry.path === path);
+
+  if (failed) {
+    return { status: "failed", message: failed.message || "Import failed." };
+  }
+
+  if (duplicate) {
+    return { status: "duplicate", message: duplicate.message || "Duplicate item." };
+  }
+
+  if (imported > 0) {
+    return { status: "imported", message: `Imported ${imported} file.` };
+  }
+
+  return { status: "unknown", message: "Import finished with no matching result." };
+}
+
+function scanLinksInPage() {
+  const supported = ["pdf", "docx", "epub"];
+  const seen = new Set();
+  const candidates = [];
+
+  for (const anchor of document.querySelectorAll("a[href]")) {
+    const href = anchor.getAttribute("href");
+    if (!href) continue;
+
+    try {
+      const url = new URL(href, window.location.href).toString();
+      const pathname = new URL(url).pathname.toLowerCase();
+      const match = pathname.match(/\.([a-z0-9]+)$/);
+      if (!match || !supported.includes(match[1]) || seen.has(url)) continue;
+
+      seen.add(url);
+      candidates.push({
+        url,
+        title: anchor.textContent?.replace(/\s+/g, " ").trim() || anchor.getAttribute("title") || url,
+        fileType: match[1],
+        fileLabel: match[1].toUpperCase(),
+        source: "page-link"
+      });
+    } catch {
+      // Ignore invalid URLs.
+    }
+  }
+
+  return {
+    pageUrl: window.location.href,
+    candidates
+  };
+}
