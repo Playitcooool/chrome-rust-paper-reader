@@ -15,8 +15,7 @@ This repository implements the Chrome side of the v1 browser connector. The desk
 
 ```json
 {
-  "status": "ok",
-  "port": 17654
+  "ok": true
 }
 ```
 

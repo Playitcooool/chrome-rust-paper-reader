@@ -52,25 +52,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function getConfig() {
-  const stored = await chrome.storage.sync.get([
-    STORAGE_KEYS.connectorUrl,
-    STORAGE_KEYS.connectorToken,
-    STORAGE_KEYS.lastCollectionId
+  const [synced, local] = await Promise.all([
+    chrome.storage.sync.get([
+      STORAGE_KEYS.connectorUrl,
+      STORAGE_KEYS.connectorToken,
+      STORAGE_KEYS.lastCollectionId
+    ]),
+    chrome.storage.local.get([STORAGE_KEYS.connectorToken])
   ]);
 
+  const legacySyncToken = synced[STORAGE_KEYS.connectorToken] || "";
+  const localToken = local[STORAGE_KEYS.connectorToken] || "";
+  if (legacySyncToken) {
+    if (!localToken) {
+      await chrome.storage.local.set({ [STORAGE_KEYS.connectorToken]: legacySyncToken });
+    }
+    await chrome.storage.sync.remove(STORAGE_KEYS.connectorToken);
+  }
+
   return {
-    connectorUrl: stored[STORAGE_KEYS.connectorUrl] || DEFAULT_CONNECTOR_URL,
-    connectorToken: stored[STORAGE_KEYS.connectorToken] || "",
-    lastCollectionId: stored[STORAGE_KEYS.lastCollectionId] ?? null
+    connectorUrl: synced[STORAGE_KEYS.connectorUrl] || DEFAULT_CONNECTOR_URL,
+    connectorToken: localToken || legacySyncToken,
+    lastCollectionId: synced[STORAGE_KEYS.lastCollectionId] ?? null
   };
 }
 
 async function saveConfig(payload) {
-  await chrome.storage.sync.set({
-    [STORAGE_KEYS.connectorUrl]: payload.connectorUrl?.trim() || DEFAULT_CONNECTOR_URL,
-    [STORAGE_KEYS.connectorToken]: payload.connectorToken?.trim() || "",
-    [STORAGE_KEYS.lastCollectionId]: payload.lastCollectionId ?? null
-  });
+  await Promise.all([
+    chrome.storage.sync.set({
+      [STORAGE_KEYS.connectorUrl]: payload.connectorUrl?.trim() || DEFAULT_CONNECTOR_URL,
+      [STORAGE_KEYS.lastCollectionId]: payload.lastCollectionId ?? null
+    }),
+    chrome.storage.local.set({
+      [STORAGE_KEYS.connectorToken]: payload.connectorToken?.trim() || ""
+    }),
+    chrome.storage.sync.remove(STORAGE_KEYS.connectorToken)
+  ]);
   return { ok: true };
 }
 

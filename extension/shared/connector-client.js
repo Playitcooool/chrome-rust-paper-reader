@@ -9,20 +9,48 @@ async function request(baseUrl, path, { token, method = "GET", body } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body)
-  });
+  let response;
+  try {
+    response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  } catch {
+    throw new Error("Paper Reader desktop connector is unreachable. Start Paper Reader and confirm the connector URL.");
+  }
 
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
 
   if (!response.ok) {
-    throw new Error(data?.error || data?.message || `${response.status} ${response.statusText}`.trim());
+    throw new Error(userMessageForError(response.status, response.statusText, data));
   }
 
   return data;
+}
+
+function userMessageForError(status, statusText, data) {
+  const serverMessage = data?.error || data?.message || "";
+  const normalized = serverMessage.toLowerCase();
+
+  if (status === 401 || status === 403 || normalized.includes("unauthorized")) {
+    return "Connector token was rejected. Check that the pasted token matches Paper Reader.";
+  }
+
+  if (normalized.includes("collection")) {
+    return "The selected Paper Reader collection no longer exists. Refresh collections and choose another one.";
+  }
+
+  if (normalized.includes("absolute")) {
+    return "Paper Reader rejected the downloaded file path because it was not absolute.";
+  }
+
+  if (status >= 500) {
+    return "Paper Reader import failed. The temporary download was kept for inspection.";
+  }
+
+  return serverMessage || `${status} ${statusText}`.trim();
 }
 
 export async function checkHealth(baseUrl) {

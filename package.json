@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "smoke": "node scripts/smoke-test.js",
+    "package": "node scripts/package-extension.js",
     "mock-connector": "node scripts/mock-connector.js"
   }
 }

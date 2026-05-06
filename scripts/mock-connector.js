@@ -1,6 +1,6 @@
 import http from "node:http";
 
-const PORT = 17654;
+const PORT = Number(process.env.PAPER_READER_CONNECTOR_PORT || 17654);
 const TOKEN = process.env.PAPER_READER_CONNECTOR_TOKEN || "paper-reader-dev-token";
 
 const collections = [
@@ -39,7 +39,7 @@ function readBody(request) {
 
 const server = http.createServer(async (request, response) => {
   if (request.url === "/v1/health" && request.method === "GET") {
-    return json(response, 200, { status: "ok", port: PORT });
+    return json(response, 200, { ok: true });
   }
 
   const auth = request.headers.authorization;

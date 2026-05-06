@@ -8,7 +8,7 @@ Chrome MV3 extension for saving PDF, DOCX, and EPUB files from the current tab i
 - Background service worker that owns downloads, import requests, duplicate handling, and temp file cleanup.
 - On-demand page scanning via `chrome.scripting.executeScript`, only when the popup flow needs file detection.
 - Right-click `Save to Paper Reader` menu for direct file links, using the last selected collection.
-- Mock localhost connector for standalone extension testing before the desktop-side HTTP server lands.
+- Mock localhost connector for standalone extension testing against the same route shapes as the desktop connector.
 
 ## Repository layout
 
@@ -28,7 +28,7 @@ Chrome MV3 extension for saving PDF, DOCX, and EPUB files from the current tab i
 
 ## Configure it
 
-1. Start the desktop-side connector or run the mock server below.
+1. Start the Paper Reader desktop connector from `/Volumes/Samsung/Projects/paper-reader`, or run the mock server below.
 2. Click the extension icon.
 3. Enter the connector URL. Default is `http://127.0.0.1:17654`.
 4. Paste the Paper Reader connector token.
@@ -48,6 +48,8 @@ Default token is `paper-reader-dev-token`.
 
 ```bash
 rtk npm test
+rtk npm run smoke
+rtk npm run package
 ```
 
 ## Desktop integration notes
@@ -64,4 +66,4 @@ The exact request and response contract is documented in [docs/paper-reader-conn
 
 - Context-menu import uses the last selected collection from the popup; Chrome does not provide a practical inline tree picker for v1.
 - File discovery on non-direct links relies on URL/path heuristics, not site-specific parsing.
-- The actual Paper Reader desktop connector is not implemented in this repository because the desktop app lives in `/Volumes/Samsung/Projects/paper-reader`.
+- The actual Paper Reader desktop connector exists in `/Volumes/Samsung/Projects/paper-reader`; this repository contains only the Chrome extension and mock connector.

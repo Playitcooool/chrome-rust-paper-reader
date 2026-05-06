@@ -74,7 +74,7 @@ async function handleHealthCheck() {
   setStatus(connectionStatus, "Checking connector…");
   try {
     const response = await checkHealth(baseUrl);
-    setStatus(connectionStatus, response.status || "Connector reachable.", "success");
+    setStatus(connectionStatus, response.ok ? "Connector reachable." : "Connector health check returned an unexpected response.", response.ok ? "success" : "error");
   } catch (error) {
     setStatus(connectionStatus, error.message, "error");
   }
