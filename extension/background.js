@@ -239,26 +239,50 @@ function inferExtensionFromUrl(url) {
 
 function waitForDownload(downloadId) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer = null;
+    let timeoutTimer = null;
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      callback(value);
+    };
+
+    const inspectCurrentState = () => {
+      chrome.downloads.search({ id: downloadId }, (items) => {
+        if (settled) return;
+        const item = items?.[0];
+        if (!item) return;
+        if (item.state === "complete") {
+          if (!item.filename) {
+            finish(reject, new Error("Download completed without a local filename."));
+            return;
+          }
+          finish(resolve, item);
+        } else if (item.state === "interrupted") {
+          finish(reject, new Error(item.error || "Download interrupted."));
+        }
+      });
+    };
+
     const onChanged = (delta) => {
       if (delta.id !== downloadId) return;
       if (delta.state?.current === "complete") {
-        chrome.downloads.search({ id: downloadId }, (items) => {
-          chrome.downloads.onChanged.removeListener(onChanged);
-          const item = items?.[0];
-          if (!item?.filename) {
-            reject(new Error("Download completed without a local filename."));
-            return;
-          }
-          resolve(item);
-        });
+        inspectCurrentState();
       }
       if (delta.state?.current === "interrupted") {
-        chrome.downloads.onChanged.removeListener(onChanged);
-        reject(new Error(delta.error?.current || "Download interrupted."));
+        finish(reject, new Error(delta.error?.current || "Download interrupted."));
       }
     };
 
     chrome.downloads.onChanged.addListener(onChanged);
+    pollTimer = setInterval(inspectCurrentState, 500);
+    timeoutTimer = setTimeout(() => finish(reject, new Error("Download did not complete in time.")), 120000);
+    inspectCurrentState();
   });
 }
 
@@ -278,8 +302,16 @@ async function cleanupDownload(downloadId) {
 
 function summarizeImportResult(result, path) {
   const imported = result.imported?.length || 0;
+  const matchingResult = (result.results || []).find((entry) => entry.path === path);
   const duplicate = (result.duplicates || []).find((entry) => entry.path === path);
   const failed = (result.failed || []).find((entry) => entry.path === path);
+
+  if (matchingResult) {
+    return {
+      status: matchingResult.status,
+      message: matchingResult.message || defaultImportMessage(matchingResult.status, imported)
+    };
+  }
 
   if (failed) {
     return { status: "failed", message: failed.message || "Import failed." };
@@ -294,6 +326,13 @@ function summarizeImportResult(result, path) {
   }
 
   return { status: "unknown", message: "Import finished with no matching result." };
+}
+
+function defaultImportMessage(status, imported) {
+  if (status === "failed") return "Import failed.";
+  if (status === "duplicate") return "Duplicate item.";
+  if (status === "imported") return `Imported ${imported || 1} file.`;
+  return "Import finished.";
 }
 
 function scanLinksInPage() {
