@@ -123,17 +123,17 @@ async function scanPage() {
   renderCandidates();
 
   if (state.candidates.length === 0) {
-    setStatus(importStatus, "No PDF, DOCX, or EPUB links found on this page.", "error");
+    setStatus(importStatus, "No importable PDF links or readable page content found.", "error");
     return;
   }
 
-  if (state.candidates.length === 1) {
+  if (state.candidates.length === 1 && state.candidates[0].importType !== "markdown") {
     setStatus(importStatus, "Found one file. Importing automatically…", "success");
     await importCandidate(state.candidates[0]);
     return;
   }
 
-  setStatus(importStatus, `Found ${state.candidates.length} files. Pick one to import.`, "success");
+  setStatus(importStatus, `Found ${state.candidates.length} import options. Pick one to import.`, "success");
 }
 
 function renderCandidates() {
@@ -180,7 +180,7 @@ async function importCandidate(candidate) {
   }
 
   await saveConfig();
-  setStatus(importStatus, `Downloading ${candidate.title || candidate.url}…`);
+  setStatus(importStatus, candidate.importType === "markdown" ? `Saving ${candidate.title || candidate.url}…` : `Downloading ${candidate.title || candidate.url}…`);
 
   const response = await sendMessage({
     type: "paper-reader:import-candidate",
@@ -192,12 +192,14 @@ async function importCandidate(candidate) {
   });
 
   if (!response.ok) {
-    setStatus(importStatus, `${response.error}. Temporary file kept at ${response.download?.localPath || "download directory"}.`, "error");
+    const suffix = response.download?.localPath ? ` Temporary file kept at ${response.download.localPath}.` : "";
+    setStatus(importStatus, `${response.error}.${suffix}`, "error");
     return;
   }
 
   const tone = response.outcome.status === "failed" ? "error" : "success";
-  setStatus(importStatus, `${response.outcome.message} ${response.download.localPath}`, tone);
+  const location = response.download?.localPath ? ` ${response.download.localPath}` : " Saved to collection.";
+  setStatus(importStatus, `${response.outcome.message}${location}`, tone);
 }
 
 document.querySelector("#saveConfigButton").addEventListener("click", () => {
@@ -214,7 +216,7 @@ document.querySelector("#scanButton").addEventListener("click", () => {
 });
 collectionSelect.addEventListener("change", () => {
   state.config = { ...(state.config || {}), lastCollectionId: Number(collectionSelect.value) || null };
-  if (state.candidates.length === 1) {
+  if (state.candidates.length === 1 && state.candidates[0].importType !== "markdown") {
     void importCandidate(state.candidates[0]);
   }
 });

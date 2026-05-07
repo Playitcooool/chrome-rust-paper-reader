@@ -10,6 +10,7 @@ const collections = [
 ];
 
 const importedPaths = new Set();
+const importedMarkdown = new Set();
 
 function json(response, status, payload) {
   response.writeHead(status, { "Content-Type": "application/json" });
@@ -77,6 +78,38 @@ const server = http.createServer(async (request, response) => {
       duplicates: [],
       failed: [],
       results: [{ path: body.path, status: "imported", message: "Imported", item: null }]
+    });
+  }
+
+  if (request.url === "/v1/import-markdown" && request.method === "POST") {
+    const body = await readBody(request);
+    const collection = collections.find((entry) => entry.id === body.collection_id);
+    if (!collection) {
+      return json(response, 400, { error: "Collection does not exist" });
+    }
+    if (!body.title || !body.title.trim()) {
+      return json(response, 400, { error: "Title must not be empty" });
+    }
+    if (!body.markdown || !body.markdown.trim()) {
+      return json(response, 400, { error: "Markdown must not be empty" });
+    }
+    const path = body.source_url || body.title;
+    const fingerprint = body.markdown;
+    if (importedMarkdown.has(fingerprint)) {
+      return json(response, 200, {
+        imported: [],
+        duplicates: [{ path, status: "duplicate", message: "Already imported", item: null }],
+        failed: [],
+        results: [{ path, status: "duplicate", message: "Already imported", item: null }]
+      });
+    }
+
+    importedMarkdown.add(fingerprint);
+    return json(response, 200, {
+      imported: [{ id: Date.now(), title: body.title, primary_attachment_id: Date.now() + 1 }],
+      duplicates: [],
+      failed: [],
+      results: [{ path, status: "imported", message: "Imported", item: null }]
     });
   }
 

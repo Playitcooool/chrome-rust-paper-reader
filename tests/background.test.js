@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 function summarizeImportResult(result, path) {
   const imported = result.imported?.length || 0;
@@ -74,6 +77,19 @@ function waitForDownloadWithChrome(chromeApi, downloadId, { pollMs = 10, timeout
   });
 }
 
+function extractFunctionSource(source, functionName) {
+  const start = source.indexOf(`function ${functionName}(`);
+  assert.notEqual(start, -1);
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`Could not extract ${functionName}`);
+}
+
 test("summarizeImportResult reports duplicate for matching path", () => {
   const result = summarizeImportResult(
     {
@@ -137,4 +153,15 @@ test("waitForDownload recovers when completion event was missed", async () => {
   const item = await waitForDownloadWithChrome(chromeApi, 42);
   assert.equal(item.filename, "/tmp/example.pdf");
   assert.equal(listeners.size, 0);
+});
+
+test("injected page scanner is self-contained", () => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(testDir, "../extension/background.js"), "utf8");
+  const scanner = extractFunctionSource(source, "scanPageCandidates");
+
+  assert.match(scanner, /function domNodeToMarkdown\(/);
+  assert.match(scanner, /function tableToMarkdown\(/);
+  assert.equal((source.match(/function domNodeToMarkdown\(/g) || []).length, 1);
+  assert.equal((source.match(/function tableToMarkdown\(/g) || []).length, 1);
 });

@@ -68,3 +68,11 @@ export async function importPath(baseUrl, token, payload) {
     body: payload
   });
 }
+
+export async function importMarkdown(baseUrl, token, payload) {
+  return request(baseUrl, "/v1/import-markdown", {
+    method: "POST",
+    token,
+    body: payload
+  });
+}

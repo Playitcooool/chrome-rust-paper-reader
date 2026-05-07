@@ -5,7 +5,7 @@ import {
   STORAGE_KEYS
 } from "./shared/constants.js";
 import { classifyUrl, dedupeCandidates, sanitizeFilename } from "./shared/file-detection.js";
-import { fetchCollections, importPath } from "./shared/connector-client.js";
+import { fetchCollections, importMarkdown, importPath } from "./shared/connector-client.js";
 
 const downloadJobs = new Map();
 
@@ -118,7 +118,7 @@ async function detectPageFiles(tabId) {
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: scanLinksInPage
+    func: scanPageCandidates
   });
   const candidates = dedupeCandidates(result?.candidates || []);
   return {
@@ -141,6 +141,10 @@ async function importCandidate(payload, tabId) {
   const config = await getConfig();
   if (!config.connectorToken) {
     throw new Error("Connector token is required.");
+  }
+
+  if (payload.candidate.fileType === "html" || payload.candidate.importType === "markdown") {
+    return importHtmlCandidate(payload, config, tabId);
   }
 
   const download = await downloadToTemp(payload.candidate.url, payload.candidate.title);
@@ -187,6 +191,25 @@ async function importCandidate(payload, tabId) {
   } finally {
     downloadJobs.delete(download.downloadId);
   }
+}
+
+async function importHtmlCandidate(payload, config, tabId) {
+  const result = await importMarkdown(config.connectorUrl, config.connectorToken, {
+    collection_id: payload.collectionId,
+    title: payload.candidate.title,
+    markdown: payload.candidate.markdown,
+    source_url: payload.candidate.url,
+    page_url: payload.pageUrl
+  });
+  const outcome = summarizeImportResult(result, payload.candidate.url);
+  await chrome.storage.sync.set({ [STORAGE_KEYS.lastCollectionId]: payload.collectionId });
+  return {
+    ok: true,
+    result,
+    outcome,
+    download: null,
+    tabId
+  };
 }
 
 async function handleContextMenuImport(linkUrl, pageUrl) {
@@ -352,10 +375,99 @@ function defaultImportMessage(status, imported) {
   return "Import finished.";
 }
 
-function scanLinksInPage() {
+function scanPageCandidates() {
+  function domNodeToMarkdown(root) {
+    const blocks = [];
+    const walk = (node, listDepth = 0) => {
+      if (node.nodeType === Node.TEXT_NODE) return node.textContent || "";
+      if (node.nodeType !== Node.ELEMENT_NODE) return "";
+      const tag = node.tagName.toLowerCase();
+      if (["script", "style", "noscript", "svg", "canvas", "nav", "footer"].includes(tag)) return "";
+
+      const inline = () => Array.from(node.childNodes).map((child) => walk(child, listDepth)).join("").replace(/\s+/g, " ").trim();
+      const blockChildren = () => Array.from(node.childNodes).forEach((child) => {
+        const text = walk(child, listDepth);
+        if (text.trim()) blocks.push(text.trim());
+      });
+
+      if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${inline()}`;
+      if (tag === "p") return inline();
+      if (tag === "br") return "\n";
+      if (tag === "a") {
+        const text = inline();
+        const href = node.getAttribute("href");
+        if (!href || !text) return text;
+        try {
+          return `[${text}](${new URL(href, window.location.href).toString()})`;
+        } catch {
+          return text;
+        }
+      }
+      if (tag === "img") {
+        const alt = node.getAttribute("alt")?.replace(/\s+/g, " ").trim();
+        return alt ? `![${alt}]()` : "";
+      }
+      if (tag === "strong" || tag === "b") return `**${inline()}**`;
+      if (tag === "em" || tag === "i") return `*${inline()}*`;
+      if (tag === "code") return `\`${inline()}\``;
+      if (tag === "pre") return `\`\`\`\n${node.textContent?.trim() || ""}\n\`\`\``;
+      if (tag === "blockquote") return inline().split("\n").map((line) => `> ${line}`).join("\n");
+      if (tag === "li") return `${"  ".repeat(listDepth)}- ${inline()}`;
+      if (tag === "ul" || tag === "ol") {
+        return Array.from(node.children).map((child) => walk(child, listDepth + 1)).filter(Boolean).join("\n");
+      }
+      if (tag === "table") return tableToMarkdown(node);
+      if (["article", "main", "section", "div", "body"].includes(tag)) {
+        blockChildren();
+        return "";
+      }
+      return inline();
+    };
+    const top = walk(root);
+    if (top.trim()) blocks.push(top.trim());
+    return blocks.join("\n\n").replace(/\n{3,}/g, "\n\n");
+  }
+
+  function tableToMarkdown(table) {
+    const rows = Array.from(table.querySelectorAll("tr"))
+      .map((row) => Array.from(row.children).map((cell) => cell.textContent.replace(/\s+/g, " ").trim()).filter(Boolean))
+      .filter((row) => row.length > 0);
+    if (rows.length === 0) return "";
+    const width = Math.max(...rows.map((row) => row.length));
+    const normalized = rows.map((row) => [...row, ...Array(width - row.length).fill("")]);
+    const header = normalized[0];
+    const separator = Array(width).fill("---");
+    return [header, separator, ...normalized.slice(1)]
+      .map((row) => `| ${row.join(" | ")} |`)
+      .join("\n");
+  }
+
   const supported = ["pdf", "docx", "epub"];
   const seen = new Set();
   const candidates = [];
+  const pageUrl = window.location.href;
+  const title =
+    document.title?.replace(/\s+/g, " ").trim() ||
+    document.querySelector("h1")?.textContent?.replace(/\s+/g, " ").trim() ||
+    pageUrl;
+  const root =
+    document.querySelector("article") ||
+    document.querySelector("main") ||
+    document.querySelector("[role='main']") ||
+    document.body;
+  const markdown = root ? domNodeToMarkdown(root).trim() : "";
+  if (markdown) {
+    candidates.push({
+      url: pageUrl,
+      title,
+      fileType: "html",
+      fileLabel: "HTML",
+      importType: "markdown",
+      markdown,
+      source: "page-html"
+    });
+    seen.add(pageUrl);
+  }
 
   for (const anchor of document.querySelectorAll("a[href]")) {
     const href = anchor.getAttribute("href");
@@ -381,7 +493,7 @@ function scanLinksInPage() {
   }
 
   return {
-    pageUrl: window.location.href,
+    pageUrl,
     candidates
   };
 }

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Paper Reader Connector",
   "version": "0.1.0",
-  "description": "Save PDF, DOCX, and EPUB files from Chrome into Paper Reader.",
+  "description": "Save PDFs and readable web pages from Chrome into Paper Reader.",
   "permissions": [
     "downloads",
     "contextMenus",
